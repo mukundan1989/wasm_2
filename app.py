@@ -3,82 +3,131 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
 import base64
-from io import StringIO
+import time
 
-# Streamlit app title and description
-st.title("Yahoo Finance to IndexedDB (WASM) Uploader")
+# Streamlit app configuration
+st.set_page_config(layout="wide")
+st.title("Batch Stock Data Download to IndexedDB")
 st.write("""
-Download stock data from Yahoo Finance and store it in the browser's IndexedDB.
-The data will persist in the user's browser.
+Download historical stock data for multiple symbols and store in browser's IndexedDB.
 """)
 
-# User inputs
-col1, col2 = st.columns(2)
-with col1:
-    symbol = st.text_input("Stock Symbol", value="AAPL").upper()
-with col2:
-    days = st.number_input("Days of History", min_value=1, max_value=365*5, value=30)
-
-if st.button("Download and Store Data"):
+# Load symbols from CSV
+@st.cache_data
+def load_symbols():
     try:
-        # Calculate date range
-        end_date = datetime.today()
-        start_date = end_date - timedelta(days=days)
+        symbols_df = pd.read_csv("symbols.csv")
+        return list(symbols_df['Symbol'].unique())
+    except Exception as e:
+        st.error(f"Could not load symbols.csv: {str(e)}")
+        return []
+
+symbols = load_symbols()
+
+# Only proceed if we have symbols
+if not symbols:
+    st.stop()
+
+# UI Elements
+days = st.number_input("Days of History", min_value=1, max_value=365*5, value=30)
+
+if st.button("Download All Symbols"):
+    if not symbols:
+        st.error("No symbols found in symbols.csv")
+        st.stop()
+    
+    # Calculate date range
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=days)
+    
+    # Initialize progress
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    results = []
+    
+    # Download each symbol
+    for i, symbol in enumerate(symbols):
+        try:
+            symbol = symbol.strip().upper()
+            status_text.text(f"Downloading {symbol} ({i+1}/{len(symbols)})...")
+            
+            # Download data
+            df = yf.download(symbol, start=start_date, end=end_date, progress=False)
+            
+            if df.empty:
+                results.append({"symbol": symbol, "status": "failed", "message": "No data found"})
+                continue
+            
+            # Prepare data
+            df = df.reset_index()
+            df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
+            data_json = df.to_json(orient='records')
+            
+            # Store results for JavaScript
+            results.append({
+                "symbol": symbol,
+                "status": "success",
+                "data": data_json,
+                "records": len(df)
+            })
+            
+        except Exception as e:
+            results.append({"symbol": symbol, "status": "failed", "message": str(e)})
         
-        # Download data from Yahoo Finance
-        with st.spinner(f"Downloading {symbol} data from Yahoo Finance..."):
-            df = yf.download(symbol, start=start_date, end=end_date)
-        
-        if df.empty:
-            st.error("No data found for this symbol/time period")
-            st.stop()
-        
-        # Reset index to make Date a column
-        df = df.reset_index()
-        df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
-        
-        # Display preview
-        st.subheader(f"{symbol} Data Preview ({len(df)} records)")
-        st.write(df.head())
-        
-        # Convert DataFrame to JSON
-        data_json = df.to_json(orient='records')
-        
-        # Create JavaScript code to store in IndexedDB
-        js_code = f"""
-        <script>
-        // Initialize IndexedDB
-        let db;
-        const request = indexedDB.open("StockDatabase", 2);  // Version 2
-        
-        request.onerror = function(event) {{
-            console.log("Database error: " + event.target.errorCode);
-        }};
-        
-        request.onupgradeneeded = function(event) {{
-            db = event.target.result;
-            // Delete old object store if it exists
-            if (db.objectStoreNames.contains("stockData")) {{
-                db.deleteObjectStore("stockData");
-            }}
+        # Update progress
+        progress_bar.progress((i + 1) / len(symbols))
+    
+    # Generate JavaScript code
+    success_count = sum(1 for r in results if r['status'] == 'success')
+    js_code = f"""
+    <script>
+    // Initialize IndexedDB
+    let db;
+    const request = indexedDB.open("StockDatabase", 3);  // Version 3
+    
+    request.onerror = function(event) {{
+        console.log("Database error: " + event.target.errorCode);
+    }};
+    
+    request.onupgradeneeded = function(event) {{
+        db = event.target.result;
+        if (!db.objectStoreNames.contains("stockData")) {{
             const objectStore = db.createObjectStore("stockData", {{ keyPath: "id", autoIncrement: true }});
             objectStore.createIndex("symbol", "symbol", {{ unique: false }});
             objectStore.createIndex("date", "date", {{ unique: false }});
             console.log("Database setup complete");
-        }};
+        }}
+    }};
+    
+    request.onsuccess = function(event) {{
+        db = event.target.result;
+        console.log("Database opened successfully");
         
-        request.onsuccess = function(event) {{
-            db = event.target.result;
-            console.log("Database opened successfully");
+        // Process results
+        const results = {results};
+        let totalAdded = 0;
+        
+        function processNext(index) {{
+            if (index >= results.length) {{
+                // All done
+                alert(`Processed ${{results.length}} symbols. Success: ${{success_count}}, Failed: ${{results.length - success_count}}`);
+                return;
+            }}
+            
+            const result = results[index];
+            if (result.status !== 'success') {{
+                console.log(`Skipping ${{result.symbol}}: ${{result.message}}`);
+                processNext(index + 1);
+                return;
+            }}
             
             // Clear existing data for this symbol
             const transaction = db.transaction(["stockData"], "readwrite");
             const objectStore = transaction.objectStore("stockData");
-            const index = objectStore.index("symbol");
-            const clearRequest = index.openCursor(IDBKeyRange.only("{symbol}"));
+            const indexReq = objectStore.index("symbol").openCursor(IDBKeyRange.only(result.symbol));
             
             let recordsToDelete = [];
-            clearRequest.onsuccess = function(event) {{
+            indexReq.onsuccess = function(event) {{
                 const cursor = event.target.result;
                 if (cursor) {{
                     recordsToDelete.push(cursor.value.id);
@@ -94,65 +143,83 @@ if st.button("Download and Store Data"):
                         }});
                         
                         deleteTransaction.oncomplete = function() {{
-                            console.log(`Deleted ${{recordsToDelete.length}} old records for {symbol}`);
-                            addNewData();
+                            console.log(`Deleted ${{recordsToDelete.length}} old records for ${{result.symbol}}`);
+                            addNewData(result, index);
                         }};
                     }} else {{
-                        addNewData();
+                        addNewData(result, index);
                     }}
                 }}
             }};
+        }}
+        
+        function addNewData(result, index) {{
+            // Add new data
+            const data = JSON.parse(result.data);
+            const addTransaction = db.transaction(["stockData"], "readwrite");
+            const addStore = addTransaction.objectStore("stockData");
             
-            function addNewData() {{
-                // Add new data
-                const data = {data_json};
-                const addTransaction = db.transaction(["stockData"], "readwrite");
-                const addStore = addTransaction.objectStore("stockData");
-                
-                data.forEach(item => {{
-                    // Add symbol to each record for filtering
-                    const record = {{
-                        symbol: "{symbol}",
-                        date: item.Date,
-                        data: item
-                    }};
-                    addStore.add(record);
-                }});
-                
-                addTransaction.oncomplete = function() {{
-                    console.log("All data added successfully");
-                    alert(`${{data.length}} {symbol} records stored in IndexedDB successfully!`);
+            data.forEach(item => {{
+                const record = {{
+                    symbol: result.symbol,
+                    date: item.Date,
+                    data: item
                 }};
-            }}
-        }};
-        </script>
-        """
+                addStore.add(record);
+            }});
+            
+            addTransaction.oncomplete = function() {{
+                console.log(`Added ${{data.length}} records for ${{result.symbol}}`);
+                totalAdded += data.length;
+                processNext(index + 1);
+            }};
+        }}
         
-        # Display success message
-        st.success(f"{symbol} data downloaded and processed successfully!")
+        // Start processing
+        processNext(0);
+    }};
+    </script>
+    """
+    
+    # Display results
+    st.success(f"Downloaded {success_count}/{len(symbols)} symbols successfully!")
+    
+    # Show summary table
+    results_df = pd.DataFrame(results)
+    st.subheader("Download Summary")
+    st.dataframe(results_df)
+    
+    # Execute JavaScript
+    st.components.v1.html(js_code, height=0)
+
+# Symbol selection dropdown (after download)
+if 'results' in locals():
+    success_symbols = [r['symbol'] for r in results if r['status'] == 'success']
+    if success_symbols:
+        selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
         
-        # Execute the JavaScript
-        st.components.v1.html(js_code, height=0)
+        # Display preview for selected symbol
+        selected_data = next(r for r in results if r['symbol'] == selected_symbol and r['status'] == 'success')
+        df = pd.read_json(StringIO(selected_data['data']))
+        st.subheader(f"{selected_symbol} Data Preview")
+        st.dataframe(df)
         
-        # Download link for the data (optional)
+        # Download button
         csv = df.to_csv(index=False)
         b64 = base64.b64encode(csv.encode()).decode()
-        href = f'<a href="data:file/csv;base64,{b64}" download="{symbol}_stock_data.csv">Download {symbol} CSV</a>'
+        href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download {selected_symbol} CSV</a>'
         st.markdown(href, unsafe_allow_html=True)
-        
-    except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
 
-# Add instructions
-st.markdown("""
+# Instructions
+st.sidebar.markdown("""
 ### Instructions:
-1. Enter a stock symbol (e.g., AAPL, MSFT, TSLA)
-2. Select how many days of historical data you want
-3. Click "Download and Store Data"
-4. The data will be saved in your browser's IndexedDB
+1. Ensure `symbols.csv` exists with a "Symbol" column
+2. Set the number of days of history needed
+3. Click "Download All Symbols"
+4. View results and select a symbol to preview
 
 ### Notes:
-- Data persists in your browser until you clear site data
-- You can retrieve this data later from any page on this domain
-- Uses Yahoo Finance API via yfinance Python package
+- Data is stored in your browser's IndexedDB
+- Failed downloads will be shown in the summary table
+- Symbols are processed sequentially
 """)
