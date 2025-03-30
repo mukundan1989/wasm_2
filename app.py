@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
 import base64
+from io import StringIO
 import time
 
 # Streamlit app configuration
@@ -17,7 +18,7 @@ Download historical stock data for multiple symbols and store in browser's Index
 def load_symbols():
     try:
         symbols_df = pd.read_csv("symbols.csv")
-        return list(symbols_df['Symbol'].unique())
+        return [s.strip().upper() for s in symbols_df['Symbol'].unique() if pd.notna(s)]
     except Exception as e:
         st.error(f"Could not load symbols.csv: {str(e)}")
         return []
@@ -30,6 +31,7 @@ if not symbols:
 
 # UI Elements
 days = st.number_input("Days of History", min_value=1, max_value=365*5, value=30)
+max_retries = 3  # Number of retry attempts for failed downloads
 
 if st.button("Download All Symbols"):
     if not symbols:
@@ -48,27 +50,49 @@ if st.button("Download All Symbols"):
     # Download each symbol
     for i, symbol in enumerate(symbols):
         try:
-            symbol = symbol.strip().upper()
             status_text.text(f"Downloading {symbol} ({i+1}/{len(symbols)})...")
             
-            # Download data
-            df = yf.download(symbol, start=start_date, end=end_date, progress=False)
+            # Try downloading with retries
+            df = None
+            for attempt in range(max_retries):
+                try:
+                    df = yf.download(
+                        symbol, 
+                        start=start_date, 
+                        end=end_date, 
+                        progress=False,
+                        auto_adjust=True  # Explicitly set to handle yfinance changes
+                    )
+                    if df is not None and not df.empty:
+                        break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(1)  # Wait before retrying
             
-            if df.empty:
-                results.append({"symbol": symbol, "status": "failed", "message": "No data found"})
+            if df is None or df.empty:
+                results.append({"symbol": symbol, "status": "failed", "message": "No data found after retries"})
                 continue
             
             # Prepare data
             df = df.reset_index()
             df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
-            data_json = df.to_json(orient='records')
+            df['Symbol'] = symbol  # Add symbol column to dataframe
+            
+            # Convert to JSON safely
+            try:
+                data_json = df.to_json(orient='records', date_format='iso')
+            except Exception as e:
+                results.append({"symbol": symbol, "status": "failed", "message": f"JSON conversion error: {str(e)}"})
+                continue
             
             # Store results for JavaScript
             results.append({
                 "symbol": symbol,
                 "status": "success",
                 "data": data_json,
-                "records": len(df)
+                "records": len(df),
+                "columns": list(df.columns)
             })
             
         except Exception as e:
@@ -155,24 +179,29 @@ if st.button("Download All Symbols"):
         
         function addNewData(result, index) {{
             // Add new data
-            const data = JSON.parse(result.data);
-            const addTransaction = db.transaction(["stockData"], "readwrite");
-            const addStore = addTransaction.objectStore("stockData");
-            
-            data.forEach(item => {{
-                const record = {{
-                    symbol: result.symbol,
-                    date: item.Date,
-                    data: item
+            try {{
+                const data = JSON.parse(result.data);
+                const addTransaction = db.transaction(["stockData"], "readwrite");
+                const addStore = addTransaction.objectStore("stockData");
+                
+                data.forEach(item => {{
+                    const record = {{
+                        symbol: result.symbol,
+                        date: item.Date,
+                        data: item
+                    }};
+                    addStore.add(record);
+                }});
+                
+                addTransaction.oncomplete = function() {{
+                    console.log(`Added ${{data.length}} records for ${{result.symbol}}`);
+                    totalAdded += data.length;
+                    processNext(index + 1);
                 }};
-                addStore.add(record);
-            }});
-            
-            addTransaction.oncomplete = function() {{
-                console.log(`Added ${{data.length}} records for ${{result.symbol}}`);
-                totalAdded += data.length;
+            }} catch(e) {{
+                console.error(`Error processing ${{result.symbol}}:`, e);
                 processNext(index + 1);
-            }};
+            }}
         }}
         
         // Start processing
@@ -187,28 +216,30 @@ if st.button("Download All Symbols"):
     # Show summary table
     results_df = pd.DataFrame(results)
     st.subheader("Download Summary")
-    st.dataframe(results_df)
+    st.dataframe(results_df[['symbol', 'status', 'message']])
     
     # Execute JavaScript
     st.components.v1.html(js_code, height=0)
 
-# Symbol selection dropdown (after download)
-if 'results' in locals():
+    # Symbol selection dropdown (after download)
     success_symbols = [r['symbol'] for r in results if r['status'] == 'success']
     if success_symbols:
         selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
         
         # Display preview for selected symbol
         selected_data = next(r for r in results if r['symbol'] == selected_symbol and r['status'] == 'success')
-        df = pd.read_json(StringIO(selected_data['data']))
-        st.subheader(f"{selected_symbol} Data Preview")
-        st.dataframe(df)
-        
-        # Download button
-        csv = df.to_csv(index=False)
-        b64 = base64.b64encode(csv.encode()).decode()
-        href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download {selected_symbol} CSV</a>'
-        st.markdown(href, unsafe_allow_html=True)
+        try:
+            df = pd.read_json(StringIO(selected_data['data']))
+            st.subheader(f"{selected_symbol} Data Preview")
+            st.dataframe(df)
+            
+            # Download button
+            csv = df.to_csv(index=False)
+            b64 = base64.b64encode(csv.encode()).decode()
+            href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download {selected_symbol} CSV</a>'
+            st.markdown(href, unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Could not display data for {selected_symbol}: {str(e)}")
 
 # Instructions
 st.sidebar.markdown("""
@@ -221,5 +252,5 @@ st.sidebar.markdown("""
 ### Notes:
 - Data is stored in your browser's IndexedDB
 - Failed downloads will be shown in the summary table
-- Symbols are processed sequentially
+- Symbols are processed sequentially with retries
 """)
