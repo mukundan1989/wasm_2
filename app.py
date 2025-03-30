@@ -29,9 +29,11 @@ symbols = load_symbols()
 if not symbols:
     st.stop()
 
-# Initialize session state for available symbols
+# Initialize session state
 if 'available_symbols' not in st.session_state:
     st.session_state.available_symbols = []
+if 'downloaded_symbols' not in st.session_state:
+    st.session_state.downloaded_symbols = []
 
 # UI Elements
 days = st.number_input("Days of History", min_value=1, max_value=365*5, value=30)
@@ -109,8 +111,13 @@ if st.button("Download All Symbols"):
         # Update progress
         progress_bar.progress((i + 1) / len(symbols))
     
+    # Store downloaded symbols in session state
+    downloaded_symbols = [r['symbol'] for r in results if r['status'] == 'success']
+    st.session_state.downloaded_symbols = downloaded_symbols
+    st.session_state.available_symbols = list(set(st.session_state.available_symbols + downloaded_symbols))
+    
     # Generate JavaScript code
-    success_count = sum(1 for r in results if r['status'] == 'success')
+    success_count = len(downloaded_symbols)
     js_code = f"""
     <script>
     // Initialize IndexedDB
@@ -142,15 +149,7 @@ if st.button("Download All Symbols"):
         function processNext(index) {{
             if (index >= results.length) {{
                 // All done
-                const symbols = results.filter(r => r.status === 'success').map(r => r.symbol);
-                window.parent.postMessage({{
-                    isStreamlitMessage: true,
-                    type: 'session',
-                    data: {{
-                        key: 'downloaded_symbols',
-                        value: symbols
-                    }}
-                }}, '*');
+                console.log("All data processed");
                 return;
             }}
             
@@ -252,43 +251,41 @@ if st.button("Download All Symbols"):
     # Execute JavaScript
     st.components.v1.html(js_code, height=0)
 
-# Get updated list of available symbols
-get_symbols_js = """
-<script>
-function getStoredSymbols(callback) {
-    const request = indexedDB.open("StockDatabase", 3);
-    
-    request.onsuccess = function(event) {
-        const db = event.target.result;
-        const transaction = db.transaction(["stockData"], "readonly");
-        const objectStore = transaction.objectStore("stockData");
-        const index = objectStore.index("symbol");
-        const request = index.getAllKeys();
+# Get initial list of available symbols from IndexedDB
+if not st.session_state.available_symbols:
+    get_symbols_js = """
+    <script>
+    function getStoredSymbols(callback) {
+        const request = indexedDB.open("StockDatabase", 3);
         
-        request.onsuccess = function() {
-            const symbols = [...new Set(request.result)]; // Get unique symbols
-            callback(symbols);
+        request.onsuccess = function(event) {
+            const db = event.target.result;
+            const transaction = db.transaction(["stockData"], "readonly");
+            const objectStore = transaction.objectStore("stockData");
+            const index = objectStore.index("symbol");
+            const request = index.getAllKeys();
+            
+            request.onsuccess = function() {
+                const symbols = [...new Set(request.result)]; // Get unique symbols
+                callback(symbols);
+            };
         };
-    };
-}
+    }
 
-// Get symbols and send to Streamlit
-getStoredSymbols(function(symbols) {
-    const data = {symbols: symbols};
-    window.parent.postMessage({
-        type: 'stSymbolsData',
-        data: data
-    }, '*');
-});
-</script>
-"""
-
-# Display the JavaScript to get symbols
-st.components.v1.html(get_symbols_js, height=0)
-
-# Update available symbols when new data arrives
-if 'downloaded_symbols' in st.session_state:
-    st.session_state.available_symbols = list(set(st.session_state.available_symbols + st.session_state.downloaded_symbols))
+    // Get symbols and send to Streamlit
+    getStoredSymbols(function(symbols) {
+        window.parent.postMessage({
+            isStreamlitMessage: true,
+            type: 'session',
+            data: {
+                key: 'available_symbols',
+                value: symbols
+            }
+        }, '*');
+    });
+    </script>
+    """
+    st.components.v1.html(get_symbols_js, height=0)
 
 # Comparison Section
 st.subheader("Stock Comparison Tool")
@@ -362,11 +359,15 @@ if stock1 and stock2 and stock1 != stock2:
             
             // Send to Streamlit
             window.parent.postMessage({{
-                type: 'stComparisonData',
+                isStreamlitMessage: true,
+                type: 'session',
                 data: {{
-                    stock1: "{stock1}",
-                    stock2: "{stock2}",
-                    comparison: combined
+                    key: 'comparison_data',
+                    value: {{
+                        stock1: "{stock1}",
+                        stock2: "{stock2}",
+                        comparison: combined
+                    }}
                 }}
             }}, '*');
         }});
@@ -392,32 +393,32 @@ if stock1 and stock2 and stock1 != stock2:
                     st.warning("No matching dates found for comparison")
             except Exception as e:
                 st.error(f"Error displaying comparison data: {str(e)}")
-        else:
-            st.info("Loading comparison data...")
 
 # JavaScript message handler
 message_handler_js = """
 <script>
 window.addEventListener('message', function(event) {
-    if (event.data.type === 'stSymbolsData') {
-        window.parent.postMessage({
-            isStreamlitMessage: true,
-            type: 'session',
-            data: {
-                key: 'available_symbols',
-                value: event.data.data.symbols
-            }
-        }, '*');
-    }
-    else if (event.data.type === 'stComparisonData') {
-        window.parent.postMessage({
-            isStreamlitMessage: true,
-            type: 'session',
-            data: {
-                key: 'comparison_data',
-                value: event.data.data
-            }
-        }, '*');
+    if (event.data.isStreamlitMessage && event.data.type === 'session') {
+        if (event.data.data.key === 'available_symbols') {
+            window.parent.postMessage({
+                isStreamlitMessage: true,
+                type: 'session',
+                data: {
+                    key: 'available_symbols',
+                    value: event.data.data.value
+                }
+            }, '*');
+        }
+        else if (event.data.data.key === 'comparison_data') {
+            window.parent.postMessage({
+                isStreamlitMessage: true,
+                type: 'session',
+                data: {
+                    key: 'comparison_data',
+                    value: event.data.data.value
+                }
+            }, '*');
+        }
     }
 });
 </script>
