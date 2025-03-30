@@ -61,7 +61,7 @@ if st.button("Download All Symbols"):
                         start=start_date, 
                         end=end_date, 
                         progress=False,
-                        auto_adjust=True  # Explicitly set to handle yfinance changes
+                        auto_adjust=True
                     )
                     if df is not None and not df.empty:
                         break
@@ -74,10 +74,14 @@ if st.button("Download All Symbols"):
                 results.append({"symbol": symbol, "status": "failed", "message": "No data found after retries"})
                 continue
             
-            # Prepare data
+            # Prepare data with correct column order
             df = df.reset_index()
             df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
-            df['Symbol'] = symbol  # Add symbol column to dataframe
+            df['Symbol'] = symbol  # Add symbol column
+            
+            # Reorder columns as: Date, Symbol, Open, High, Low, Close, Volume
+            column_order = ['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Volume']
+            df = df[column_order]
             
             # Convert to JSON safely
             try:
@@ -230,10 +234,12 @@ if st.button("Download All Symbols"):
         selected_data = next(r for r in results if r['symbol'] == selected_symbol and r['status'] == 'success')
         try:
             df = pd.read_json(StringIO(selected_data['data']))
-            st.subheader(f"{selected_symbol} Data Preview")
-            st.dataframe(df)
             
-            # Download button
+            # Display without index
+            st.subheader(f"{selected_symbol} Data Preview")
+            st.dataframe(df.style.hide(axis="index"))
+            
+            # Download button (with correct column order)
             csv = df.to_csv(index=False)
             b64 = base64.b64encode(csv.encode()).decode()
             href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download {selected_symbol} CSV</a>'
@@ -251,6 +257,6 @@ st.sidebar.markdown("""
 
 ### Notes:
 - Data is stored in your browser's IndexedDB
+- Columns are ordered as: Date, Symbol, Open, High, Low, Close, Volume
 - Failed downloads will be shown in the summary table
-- Symbols are processed sequentially with retries
 """)
