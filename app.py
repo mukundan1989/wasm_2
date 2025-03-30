@@ -426,38 +426,34 @@ if stock1 and stock2 and stock1 != stock2:
                     st.warning("No matching dates found for comparison")
             except Exception as e:
                 st.error(f"Error displaying comparison data: {str(e)}")
-        else:
-            st.info("Loading comparison data...")
     else:
-        st.info("Select two different stocks to compare")
+        st.info("Retrieving comparison data...")
 
 # JavaScript message handler
 message_handler_js = """
 <script>
 window.addEventListener('message', function(event) {
-    if (event.data.isStreamlitMessage) {
-        if (event.data.type === 'session') {
-            const data = event.data.data;
-            if (data.key === 'available_symbols') {
-                window.parent.postMessage({
-                    isStreamlitMessage: true,
-                    type: 'session',
-                    data: {
-                        key: 'available_symbols',
-                        value: data.value
-                    }
-                }, '*');
-            }
-            else if (data.key === 'comparison_data') {
-                window.parent.postMessage({
-                    isStreamlitMessage: true,
-                    type: 'session',
-                    data: {
-                        key: 'comparison_data',
-                        value: data.value
-                    }
-                }, '*');
-            }
+    if (event.data.isStreamlitMessage && event.data.type === 'session') {
+        const data = event.data.data;
+        if (data.key === 'available_symbols') {
+            window.parent.postMessage({
+                isStreamlitMessage: true,
+                type: 'session',
+                data: {
+                    key: 'available_symbols',
+                    value: data.value
+                }
+            }, '*');
+        }
+        else if (data.key === 'comparison_data') {
+            window.parent.postMessage({
+                isStreamlitMessage: true,
+                type: 'session',
+                data: {
+                    key: 'comparison_data',
+                    value: data.value
+                }
+            }, '*');
         }
     }
 });
