@@ -235,12 +235,16 @@ if st.button("Download All Symbols"):
         try:
             df = pd.read_json(StringIO(selected_data['data']))
             
+            # Clean column names for display
+            clean_columns = ['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Volume']
+            df.columns = clean_columns
+            
             # Display without index
             st.subheader(f"{selected_symbol} Data Preview")
             st.dataframe(df.style.hide(axis="index"))
             
-            # Download button (with correct column order)
-            csv = df.to_csv(index=False)
+            # Download button with clean CSV
+            csv = df.to_csv(index=False, header=clean_columns)
             b64 = base64.b64encode(csv.encode()).decode()
             href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download {selected_symbol} CSV</a>'
             st.markdown(href, unsafe_allow_html=True)
@@ -259,4 +263,5 @@ st.sidebar.markdown("""
 - Data is stored in your browser's IndexedDB
 - Columns are ordered as: Date, Symbol, Open, High, Low, Close, Volume
 - Failed downloads will be shown in the summary table
+- CSV downloads will have clean column headers
 """)
