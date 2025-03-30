@@ -225,31 +225,179 @@ if st.button("Download All Symbols"):
     # Execute JavaScript
     st.components.v1.html(js_code, height=0)
 
-    # Symbol selection dropdown (after download)
-    success_symbols = [r['symbol'] for r in results if r['status'] == 'success']
-    if success_symbols:
-        selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
+# Get list of available symbols from IndexedDB
+get_symbols_js = """
+<script>
+function getStoredSymbols(callback) {
+    const request = indexedDB.open("StockDatabase", 3);
+    
+    request.onsuccess = function(event) {
+        const db = event.target.result;
+        const transaction = db.transaction(["stockData"], "readonly");
+        const objectStore = transaction.objectStore("stockData");
+        const index = objectStore.index("symbol");
+        const request = index.getAllKeys();
         
-        # Display preview for selected symbol
-        selected_data = next(r for r in results if r['symbol'] == selected_symbol and r['status'] == 'success')
-        try:
-            df = pd.read_json(StringIO(selected_data['data']))
+        request.onsuccess = function() {
+            const symbols = [...new Set(request.result)]; // Get unique symbols
+            callback(symbols);
+        };
+    };
+}
+
+// Get symbols and send to Streamlit
+getStoredSymbols(function(symbols) {
+    const data = {symbols: symbols};
+    window.parent.postMessage({
+        type: 'stSymbolsData',
+        data: data
+    }, '*');
+});
+</script>
+"""
+
+# Display the JavaScript and create a placeholder for the data
+st.components.v1.html(get_symbols_js, height=0)
+symbols_placeholder = st.empty()
+
+# Handle the symbols data when it arrives from JavaScript
+if 'available_symbols' not in st.session_state:
+    st.session_state.available_symbols = []
+
+# Check for messages from JavaScript
+symbols_data = st.session_state.get('symbols_data', None)
+if symbols_data:
+    st.session_state.available_symbols = symbols_data.get('symbols', [])
+    
+# Comparison Section
+st.subheader("Stock Comparison Tool")
+
+# Create two columns for the dropdowns
+col1, col2 = st.columns(2)
+
+with col1:
+    stock1 = st.selectbox(
+        "Select First Stock",
+        options=st.session_state.available_symbols,
+        index=0 if st.session_state.available_symbols else None
+    )
+
+with col2:
+    stock2 = st.selectbox(
+        "Select Second Stock",
+        options=st.session_state.available_symbols,
+        index=1 if len(st.session_state.available_symbols) > 1 else 0 if st.session_state.available_symbols else None
+    )
+
+# JavaScript to retrieve comparison data
+if stock1 and stock2 and stock1 != stock2:
+    compare_js = f"""
+    <script>
+    function getStockData(symbol, callback) {{
+        const request = indexedDB.open("StockDatabase", 3);
+        
+        request.onsuccess = function(event) {{
+            const db = event.target.result;
+            const transaction = db.transaction(["stockData"], "readonly");
+            const objectStore = transaction.objectStore("stockData");
+            const index = objectStore.index("symbol");
+            const request = index.getAll(IDBKeyRange.only(symbol));
             
-            # Set clean column names
-            clean_columns = ['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Volume']
-            df.columns = clean_columns
+            request.onsuccess = function() {{
+                const data = request.result.map(item => ({{
+                    date: item.date,
+                    close: item.data.Close
+                }}));
+                callback(data);
+            }};
+        }};
+    }}
+    
+    // Get data for both stocks
+    getStockData("{stock1}", function(stock1Data) {{
+        getStockData("{stock2}", function(stock2Data) {{
+            // Combine data by date
+            const combined = [];
             
-            # Display without index column
-            st.subheader(f"{selected_symbol} Data Preview")
-            st.dataframe(df.set_index('Date'))  # Using Date as index to remove the numbered index column
+            // Create a map of stock2 data by date for quick lookup
+            const stock2Map = new Map();
+            stock2Data.forEach(item => {{
+                stock2Map.set(item.date, item.close);
+            }});
             
-            # Download button with clean CSV (no index)
-            csv = df.to_csv(index=False)
-            b64 = base64.b64encode(csv.encode()).decode()
-            href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download {selected_symbol} CSV</a>'
-            st.markdown(href, unsafe_allow_html=True)
-        except Exception as e:
-            st.error(f"Could not display data for {selected_symbol}: {str(e)}")
+            // Combine matching dates
+            stock1Data.forEach(item1 => {{
+                const stock2Close = stock2Map.get(item1.date);
+                if (stock2Close !== undefined) {{
+                    combined.push({{
+                        date: item1.date,
+                        {stock1}: item1.close,
+                        {stock2}: stock2Close
+                    }});
+                }}
+            }});
+            
+            // Send to Streamlit
+            window.parent.postMessage({{
+                type: 'stComparisonData',
+                data: {{
+                    stock1: "{stock1}",
+                    stock2: "{stock2}",
+                    comparison: combined
+                }}
+            }}, '*');
+        }});
+    }});
+    </script>
+    """
+    
+    st.components.v1.html(compare_js, height=0)
+    
+    # Display comparison results
+    if 'comparison_data' in st.session_state:
+        comparison_data = st.session_state.comparison_data
+        if comparison_data['stock1'] == stock1 and comparison_data['stock2'] == stock2:
+            df = pd.DataFrame(comparison_data['comparison'])
+            if not df.empty:
+                st.subheader(f"Comparison: {stock1} vs {stock2}")
+                st.dataframe(df.set_index('date'))
+            else:
+                st.warning("No matching dates found for comparison")
+        else:
+            st.info("Loading comparison data...")
+    else:
+        st.info("Select two different stocks to compare")
+
+# Handle messages from JavaScript
+components.html(
+    """
+    <script>
+    window.addEventListener('message', function(event) {
+        if (event.data.type === 'stSymbolsData') {
+            window.parent.postMessage({
+                isStreamlitMessage: true,
+                type: 'session',
+                data: {
+                    key: 'symbols_data',
+                    value: event.data.data
+                }
+            }, '*');
+        }
+        else if (event.data.type === 'stComparisonData') {
+            window.parent.postMessage({
+                isStreamlitMessage: true,
+                type: 'session',
+                data: {
+                    key: 'comparison_data',
+                    value: event.data.data
+                }
+            }, '*');
+        }
+    });
+    </script>
+    """,
+    height=0
+)
 
 # Instructions
 st.sidebar.markdown("""
@@ -258,10 +406,11 @@ st.sidebar.markdown("""
 2. Set the number of days of history needed
 3. Click "Download All Symbols"
 4. View results and select a symbol to preview
+5. Use the Comparison Tool to compare two stocks
 
 ### Notes:
 - Data is stored in your browser's IndexedDB
 - Columns are ordered as: Date, Symbol, Open, High, Low, Close, Volume
-- The preview table shows dates as row labels (no numbered index column)
-- CSV downloads contain clean column headers without index
+- The preview table shows dates as row labels
+- CSV downloads contain clean column headers
 """)
