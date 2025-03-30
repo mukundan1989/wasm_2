@@ -32,8 +32,8 @@ if not symbols:
 # Initialize session state
 if 'available_symbols' not in st.session_state:
     st.session_state.available_symbols = []
-if 'downloaded_symbols' not in st.session_state:
-    st.session_state.downloaded_symbols = []
+if 'comparison_data' not in st.session_state:
+    st.session_state.comparison_data = None
 
 # UI Elements
 days = st.number_input("Days of History", min_value=1, max_value=365*5, value=30)
@@ -113,7 +113,6 @@ if st.button("Download All Symbols"):
     
     # Store downloaded symbols in session state
     downloaded_symbols = [r['symbol'] for r in results if r['status'] == 'success']
-    st.session_state.downloaded_symbols = downloaded_symbols
     st.session_state.available_symbols = list(set(st.session_state.available_symbols + downloaded_symbols))
     
     # Generate JavaScript code
@@ -316,12 +315,22 @@ if stock1 and stock2 and stock1 != stock2:
     function getStockData(symbol, callback) {{
         const request = indexedDB.open("StockDatabase", 3);
         
+        request.onerror = function(event) {{
+            console.error("Database error:", event.target.error);
+            callback([]);
+        }};
+        
         request.onsuccess = function(event) {{
             const db = event.target.result;
             const transaction = db.transaction(["stockData"], "readonly");
             const objectStore = transaction.objectStore("stockData");
             const index = objectStore.index("symbol");
             const request = index.getAll(IDBKeyRange.only(symbol));
+            
+            request.onerror = function(event) {{
+                console.error("Error retrieving data:", event.target.error);
+                callback([]);
+            }};
             
             request.onsuccess = function() {{
                 const data = request.result.map(item => ({{
@@ -335,27 +344,42 @@ if stock1 and stock2 and stock1 != stock2:
     
     // Get data for both stocks
     getStockData("{stock1}", function(stock1Data) {{
+        console.log("Retrieved data for", "{stock1}", stock1Data);
         getStockData("{stock2}", function(stock2Data) {{
+            console.log("Retrieved data for", "{stock2}", stock2Data);
+            
             // Combine data by date
             const combined = [];
             
-            // Create a map of stock2 data by date for quick lookup
+            // Create maps for quick lookup
+            const stock1Map = new Map();
+            stock1Data.forEach(item => {{
+                stock1Map.set(item.date, item.close);
+            }});
+            
             const stock2Map = new Map();
             stock2Data.forEach(item => {{
                 stock2Map.set(item.date, item.close);
             }});
             
-            // Combine matching dates
-            stock1Data.forEach(item1 => {{
-                const stock2Close = stock2Map.get(item1.date);
-                if (stock2Close !== undefined) {{
+            // Get all unique dates
+            const allDates = [...new Set([...stock1Data.map(d => d.date), ...stock2Data.map(d => d.date)])];
+            
+            // Combine data for matching dates
+            allDates.forEach(date => {{
+                const stock1Close = stock1Map.get(date);
+                const stock2Close = stock2Map.get(date);
+                
+                if (stock1Close !== undefined && stock2Close !== undefined) {{
                     combined.push({{
-                        date: item1.date,
-                        {stock1}: item1.close,
-                        {stock2}: stock2Close
+                        date: date,
+                        "{stock1}": stock1Close,
+                        "{stock2}": stock2Close
                     }});
                 }}
             }});
+            
+            console.log("Combined data:", combined);
             
             // Send to Streamlit
             window.parent.postMessage({{
@@ -378,14 +402,23 @@ if stock1 and stock2 and stock1 != stock2:
     st.components.v1.html(compare_js, height=0)
     
     # Display comparison results
-    if 'comparison_data' in st.session_state:
+    if st.session_state.comparison_data:
         comparison_data = st.session_state.comparison_data
         if comparison_data['stock1'] == stock1 and comparison_data['stock2'] == stock2:
             try:
                 df = pd.DataFrame(comparison_data['comparison'])
                 if not df.empty:
                     st.subheader(f"Comparison: {stock1} vs {stock2}")
-                    st.dataframe(df.set_index('date'))
+                    
+                    # Convert date strings to datetime for proper sorting
+                    df['date'] = pd.to_datetime(df['date'])
+                    df = df.sort_values('date')
+                    
+                    # Format for display
+                    display_df = df.set_index('date')
+                    display_df.index = display_df.index.strftime('%Y-%m-%d')
+                    
+                    st.dataframe(display_df)
                     
                     # Add line chart visualization
                     st.line_chart(df.set_index('date'))
@@ -393,31 +426,38 @@ if stock1 and stock2 and stock1 != stock2:
                     st.warning("No matching dates found for comparison")
             except Exception as e:
                 st.error(f"Error displaying comparison data: {str(e)}")
+        else:
+            st.info("Loading comparison data...")
+    else:
+        st.info("Select two different stocks to compare")
 
 # JavaScript message handler
 message_handler_js = """
 <script>
 window.addEventListener('message', function(event) {
-    if (event.data.isStreamlitMessage && event.data.type === 'session') {
-        if (event.data.data.key === 'available_symbols') {
-            window.parent.postMessage({
-                isStreamlitMessage: true,
-                type: 'session',
-                data: {
-                    key: 'available_symbols',
-                    value: event.data.data.value
-                }
-            }, '*');
-        }
-        else if (event.data.data.key === 'comparison_data') {
-            window.parent.postMessage({
-                isStreamlitMessage: true,
-                type: 'session',
-                data: {
-                    key: 'comparison_data',
-                    value: event.data.data.value
-                }
-            }, '*');
+    if (event.data.isStreamlitMessage) {
+        if (event.data.type === 'session') {
+            const data = event.data.data;
+            if (data.key === 'available_symbols') {
+                window.parent.postMessage({
+                    isStreamlitMessage: true,
+                    type: 'session',
+                    data: {
+                        key: 'available_symbols',
+                        value: data.value
+                    }
+                }, '*');
+            }
+            else if (data.key === 'comparison_data') {
+                window.parent.postMessage({
+                    isStreamlitMessage: true,
+                    type: 'session',
+                    data: {
+                        key: 'comparison_data',
+                        value: data.value
+                    }
+                }, '*');
+            }
         }
     }
 });
@@ -426,6 +466,14 @@ window.addEventListener('message', function(event) {
 
 # Add the message handler
 st.components.v1.html(message_handler_js, height=0)
+
+# Handle messages from JavaScript
+if st.session_state.get('_components', {}).get('message', {}).get('data'):
+    message_data = st.session_state['_components']['message']['data']
+    if message_data.get('key') == 'available_symbols':
+        st.session_state.available_symbols = message_data.get('value', [])
+    elif message_data.get('key') == 'comparison_data':
+        st.session_state.comparison_data = message_data.get('value')
 
 # Instructions
 st.sidebar.markdown("""
