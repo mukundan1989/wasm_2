@@ -268,7 +268,7 @@ if 'available_symbols' not in st.session_state:
 symbols_data = st.session_state.get('symbols_data', None)
 if symbols_data:
     st.session_state.available_symbols = symbols_data.get('symbols', [])
-    
+
 # Comparison Section
 st.subheader("Stock Comparison Tool")
 
@@ -279,14 +279,16 @@ with col1:
     stock1 = st.selectbox(
         "Select First Stock",
         options=st.session_state.available_symbols,
-        index=0 if st.session_state.available_symbols else None
+        index=0 if st.session_state.available_symbols else None,
+        key="stock1"
     )
 
 with col2:
     stock2 = st.selectbox(
         "Select Second Stock",
         options=st.session_state.available_symbols,
-        index=1 if len(st.session_state.available_symbols) > 1 else 0 if st.session_state.available_symbols else None
+        index=1 if len(st.session_state.available_symbols) > 1 else 0 if st.session_state.available_symbols else None,
+        key="stock2"
     )
 
 # JavaScript to retrieve comparison data
@@ -361,6 +363,9 @@ if stock1 and stock2 and stock1 != stock2:
             if not df.empty:
                 st.subheader(f"Comparison: {stock1} vs {stock2}")
                 st.dataframe(df.set_index('date'))
+                
+                # Add line chart visualization
+                st.line_chart(df.set_index('date'))
             else:
                 st.warning("No matching dates found for comparison")
         else:
@@ -368,36 +373,36 @@ if stock1 and stock2 and stock1 != stock2:
     else:
         st.info("Select two different stocks to compare")
 
-# Handle messages from JavaScript
-components.html(
-    """
-    <script>
-    window.addEventListener('message', function(event) {
-        if (event.data.type === 'stSymbolsData') {
-            window.parent.postMessage({
-                isStreamlitMessage: true,
-                type: 'session',
-                data: {
-                    key: 'symbols_data',
-                    value: event.data.data
-                }
-            }, '*');
-        }
-        else if (event.data.type === 'stComparisonData') {
-            window.parent.postMessage({
-                isStreamlitMessage: true,
-                type: 'session',
-                data: {
-                    key: 'comparison_data',
-                    value: event.data.data
-                }
-            }, '*');
-        }
-    });
-    </script>
-    """,
-    height=0
-)
+# JavaScript message handler
+message_handler_js = """
+<script>
+window.addEventListener('message', function(event) {
+    if (event.data.type === 'stSymbolsData') {
+        window.parent.postMessage({
+            isStreamlitMessage: true,
+            type: 'session',
+            data: {
+                key: 'symbols_data',
+                value: event.data.data
+            }
+        }, '*');
+    }
+    else if (event.data.type === 'stComparisonData') {
+        window.parent.postMessage({
+            isStreamlitMessage: true,
+            type: 'session',
+            data: {
+                key: 'comparison_data',
+                value: event.data.data
+            }
+        }, '*');
+    }
+});
+</script>
+"""
+
+# Add the message handler
+st.components.v1.html(message_handler_js, height=0)
 
 # Instructions
 st.sidebar.markdown("""
@@ -413,4 +418,5 @@ st.sidebar.markdown("""
 - Columns are ordered as: Date, Symbol, Open, High, Low, Close, Volume
 - The preview table shows dates as row labels
 - CSV downloads contain clean column headers
+- Comparison tool shows side-by-side closing prices
 """)
