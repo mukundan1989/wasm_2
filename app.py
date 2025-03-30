@@ -29,6 +29,10 @@ symbols = load_symbols()
 if not symbols:
     st.stop()
 
+# Initialize session state for available symbols
+if 'available_symbols' not in st.session_state:
+    st.session_state.available_symbols = []
+
 # UI Elements
 days = st.number_input("Days of History", min_value=1, max_value=365*5, value=30)
 max_retries = 3  # Number of retry attempts for failed downloads
@@ -138,7 +142,15 @@ if st.button("Download All Symbols"):
         function processNext(index) {{
             if (index >= results.length) {{
                 // All done
-                alert(`Processed ${{results.length}} symbols. Success: ${{success_count}}, Failed: ${{results.length - success_count}}`);
+                const symbols = results.filter(r => r.status === 'success').map(r => r.symbol);
+                window.parent.postMessage({{
+                    isStreamlitMessage: true,
+                    type: 'session',
+                    data: {{
+                        key: 'downloaded_symbols',
+                        value: symbols
+                    }}
+                }}, '*');
                 return;
             }}
             
@@ -240,7 +252,7 @@ if st.button("Download All Symbols"):
     # Execute JavaScript
     st.components.v1.html(js_code, height=0)
 
-# Get list of available symbols from IndexedDB
+# Get updated list of available symbols
 get_symbols_js = """
 <script>
 function getStoredSymbols(callback) {
@@ -271,17 +283,12 @@ getStoredSymbols(function(symbols) {
 </script>
 """
 
-# Display the JavaScript and create a placeholder for the data
+# Display the JavaScript to get symbols
 st.components.v1.html(get_symbols_js, height=0)
 
-# Handle the symbols data when it arrives from JavaScript
-if 'available_symbols' not in st.session_state:
-    st.session_state.available_symbols = []
-
-# Check for messages from JavaScript
-symbols_data = st.session_state.get('symbols_data', None)
-if symbols_data:
-    st.session_state.available_symbols = symbols_data.get('symbols', [])
+# Update available symbols when new data arrives
+if 'downloaded_symbols' in st.session_state:
+    st.session_state.available_symbols = list(set(st.session_state.available_symbols + st.session_state.downloaded_symbols))
 
 # Comparison Section
 st.subheader("Stock Comparison Tool")
@@ -387,8 +394,6 @@ if stock1 and stock2 and stock1 != stock2:
                 st.error(f"Error displaying comparison data: {str(e)}")
         else:
             st.info("Loading comparison data...")
-    else:
-        st.info("Select two different stocks to compare")
 
 # JavaScript message handler
 message_handler_js = """
@@ -399,8 +404,8 @@ window.addEventListener('message', function(event) {
             isStreamlitMessage: true,
             type: 'session',
             data: {
-                key: 'symbols_data',
-                value: event.data.data
+                key: 'available_symbols',
+                value: event.data.data.symbols
             }
         }, '*');
     }
