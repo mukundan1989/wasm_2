@@ -217,10 +217,25 @@ if st.button("Download All Symbols"):
     # Display results
     st.success(f"Downloaded {success_count}/{len(symbols)} symbols successfully!")
     
-    # Show summary table
-    results_df = pd.DataFrame(results)
-    st.subheader("Download Summary")
-    st.dataframe(results_df[['symbol', 'status', 'message']])
+    # Show summary table with error handling
+    try:
+        results_df = pd.DataFrame(results)
+        if not results_df.empty:
+            # Ensure required columns exist
+            available_columns = []
+            for col in ['symbol', 'status', 'message']:
+                if col in results_df.columns:
+                    available_columns.append(col)
+            
+            if available_columns:
+                st.subheader("Download Summary")
+                st.dataframe(results_df[available_columns])
+            else:
+                st.warning("No summary data available")
+        else:
+            st.warning("No results to display")
+    except Exception as e:
+        st.error(f"Error displaying results: {str(e)}")
     
     # Execute JavaScript
     st.components.v1.html(js_code, height=0)
@@ -258,7 +273,6 @@ getStoredSymbols(function(symbols) {
 
 # Display the JavaScript and create a placeholder for the data
 st.components.v1.html(get_symbols_js, height=0)
-symbols_placeholder = st.empty()
 
 # Handle the symbols data when it arrives from JavaScript
 if 'available_symbols' not in st.session_state:
@@ -359,15 +373,18 @@ if stock1 and stock2 and stock1 != stock2:
     if 'comparison_data' in st.session_state:
         comparison_data = st.session_state.comparison_data
         if comparison_data['stock1'] == stock1 and comparison_data['stock2'] == stock2:
-            df = pd.DataFrame(comparison_data['comparison'])
-            if not df.empty:
-                st.subheader(f"Comparison: {stock1} vs {stock2}")
-                st.dataframe(df.set_index('date'))
-                
-                # Add line chart visualization
-                st.line_chart(df.set_index('date'))
-            else:
-                st.warning("No matching dates found for comparison")
+            try:
+                df = pd.DataFrame(comparison_data['comparison'])
+                if not df.empty:
+                    st.subheader(f"Comparison: {stock1} vs {stock2}")
+                    st.dataframe(df.set_index('date'))
+                    
+                    # Add line chart visualization
+                    st.line_chart(df.set_index('date'))
+                else:
+                    st.warning("No matching dates found for comparison")
+            except Exception as e:
+                st.error(f"Error displaying comparison data: {str(e)}")
         else:
             st.info("Loading comparison data...")
     else:
