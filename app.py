@@ -1,16 +1,31 @@
 import streamlit as st
+import pandas as pd
 import streamlit.components.v1 as components
+import os
 
-# Streamlit UI
-st.title("Stock Data Storage in IndexedDB")
+# Load symbols from symbols.csv
+def load_symbols():
+    if os.path.exists("symbols.csv"):
+        df = pd.read_csv("symbols.csv")
+        return df["Symbol"].tolist()
+    return []
 
-# User input for stock symbol and data
-symbol = st.text_input("Enter Stock Symbol:")
+# UI Title
+st.title("Stock Data Storage & Retrieval using IndexedDB")
+
+# Load symbols
+symbols = load_symbols()
+
+# Select symbol to store data
+symbol = st.selectbox("Select a stock symbol to store data", [""] + symbols)
+
+# Text area for pasting CSV data
 data = st.text_area("Paste CSV Data (Date,Open,High,Low,Close,Volume):")
 
+# Store Data Button
 if st.button("Store Data in IndexedDB"):
     if symbol and data:
-        # Convert data to JavaScript-friendly format
+        # Convert CSV text to JavaScript format
         data_list = [
             {"date": row.split(",")[0], "data": {
                 "Open": row.split(",")[1],
@@ -21,11 +36,11 @@ if st.button("Store Data in IndexedDB"):
             }} for row in data.split("\n") if row
         ]
 
-        # Send data to JavaScript
+        # JavaScript to Store in IndexedDB
         js_code = f"""
         <script>
         function storeInIndexedDB(symbol, data) {{
-            let request = indexedDB.open("StockDatabase", 3);
+            let request = indexedDB.open("StockDatabase", 1);
             request.onupgradeneeded = function(event) {{
                 let db = event.target.result;
                 if (!db.objectStoreNames.contains("stockData")) {{
@@ -38,7 +53,7 @@ if st.button("Store Data in IndexedDB"):
                 let transaction = db.transaction(["stockData"], "readwrite");
                 let store = transaction.objectStore("stockData");
 
-                // Delete existing data for the symbol
+                // Delete existing data for this symbol
                 let index = store.index("symbol");
                 let range = IDBKeyRange.only(symbol);
                 let cursorRequest = index.openCursor(range);
@@ -64,14 +79,14 @@ if st.button("Store Data in IndexedDB"):
         components.html(js_code, height=0)
         st.success(f"Data stored in IndexedDB for {symbol}")
 
-# Dropdown to select stock symbol
-selected_symbol = st.selectbox("Select Symbol to Preview", [""] + [symbol])
+# Select symbol to retrieve data
+selected_symbol = st.selectbox("Select a stock symbol to retrieve data", [""] + symbols)
 
-# JavaScript to request data from IndexedDB
+# JavaScript to Retrieve Data from IndexedDB
 js_fetch_code = f"""
 <script>
 function fetchFromIndexedDB(symbol) {{
-    let request = indexedDB.open("StockDatabase", 3);
+    let request = indexedDB.open("StockDatabase", 1);
     request.onsuccess = function(event) {{
         let db = event.target.result;
         let transaction = db.transaction(["stockData"], "readonly");
@@ -87,7 +102,6 @@ function fetchFromIndexedDB(symbol) {{
                 data.push(cursor.value);
                 cursor.continue();
             }} else {{
-                // Send data back to Streamlit
                 window.parent.postMessage({{ type: "indexeddb_data", symbol: symbol, data: data }}, "*");
             }}
         }};
