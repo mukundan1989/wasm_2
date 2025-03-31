@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import base64
 from io import StringIO
 import time
+import json
 
 # Streamlit app configuration
 st.set_page_config(layout="wide")
@@ -105,7 +106,7 @@ if st.button("Download All Symbols"):
         # Update progress
         progress_bar.progress((i + 1) / len(symbols))
     
-    # Generate JavaScript code
+    # Generate JavaScript code for IndexedDB storage
     success_count = sum(1 for r in results if r['status'] == 'success')
     js_code = f"""
     <script>
@@ -210,6 +211,46 @@ if st.button("Download All Symbols"):
         
         // Start processing
         processNext(0);
+        
+        // Function to fetch data from IndexedDB
+        function fetchDataFromIndexedDB(symbol) {{
+            const transaction = db.transaction(["stockData"], "readonly");
+            const store = transaction.objectStore("stockData");
+            const request = store.index("symbol").getAll(IDBKeyRange.only(symbol));
+            
+            request.onsuccess = function(event) {{
+                const records = event.target.result;
+                if (records.length > 0) {{
+                    const data = records.map(record => record.data);
+                    Streamlit.setComponentValue({{
+                        action: "preview",
+                        symbol: symbol,
+                        data: data
+                    }});
+                }} else {{
+                    Streamlit.setComponentValue({{
+                        action: "preview",
+                        symbol: symbol,
+                        error: "No data found in IndexedDB"
+                    }});
+                }}
+            }};
+            
+            request.onerror = function(event) {{
+                Streamlit.setComponentValue({{
+                    action: "preview",
+                    symbol: symbol,
+                    error: "Failed to fetch data from IndexedDB"
+                }});
+            }};
+        }}
+        
+        // Listen for messages from Python
+        Streamlit.onMessage(function(message) {{
+            if (message.action === "fetch") {{
+                fetchDataFromIndexedDB(message.symbol);
+            }}
+        }});
     }};
     </script>
     """
@@ -225,31 +266,37 @@ if st.button("Download All Symbols"):
     # Execute JavaScript
     st.components.v1.html(js_code, height=0)
 
-    # Symbol selection dropdown (after download)
-    success_symbols = [r['symbol'] for r in results if r['status'] == 'success']
-    if success_symbols:
-        selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
+# Symbol selection and preview from IndexedDB
+success_symbols = [r['symbol'] for r in results if 'results' in locals() and r['status'] == 'success']
+if success_symbols:
+    selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
+    
+    if st.button("Preview from IndexedDB"):
+        # Send symbol to JavaScript
+        js_fetch = f"""
+        <script>
+            Streamlit.sendMessage({{"action": "fetch", "symbol": "{selected_symbol}"}});
+        </script>
+        """
+        st.components.v1.html(js_fetch, height=0)
         
-        # Display preview for selected symbol
-        selected_data = next(r for r in results if r['symbol'] == selected_symbol and r['status'] == 'success')
-        try:
-            df = pd.read_json(StringIO(selected_data['data']))
-            
-            # Set clean column names
-            clean_columns = ['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Volume']
-            df.columns = clean_columns
-            
-            # Display without index column
-            st.subheader(f"{selected_symbol} Data Preview")
-            st.dataframe(df.set_index('Date'))  # Using Date as index to remove the numbered index column
-            
-            # Download button with clean CSV (no index)
-            csv = df.to_csv(index=False)
-            b64 = base64.b64encode(csv.encode()).decode()
-            href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download {selected_symbol} CSV</a>'
-            st.markdown(href, unsafe_allow_html=True)
-        except Exception as e:
-            st.error(f"Could not display data for {selected_symbol}: {str(e)}")
+        # Handle the response from JavaScript
+        @st.experimental_connect
+        def handle_preview_data(message):
+            if message.get("action") == "preview":
+                if "error" in message:
+                    st.error(f"Error for {message['symbol']}: {message['error']}")
+                else:
+                    # Display the data
+                    df = pd.DataFrame(message["data"])
+                    st.subheader(f"{message['symbol']} Data (from IndexedDB)")
+                    st.dataframe(df.set_index('Date'))  # Clean display
+                    
+                    # Download CSV
+                    csv = df.to_csv(index=False)
+                    b64 = base64.b64encode(csv.encode()).decode()
+                    href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download CSV</a>'
+                    st.markdown(href, unsafe_allow_html=True)
 
 # Instructions
 st.sidebar.markdown("""
@@ -257,11 +304,10 @@ st.sidebar.markdown("""
 1. Ensure `symbols.csv` exists with a "Symbol" column
 2. Set the number of days of history needed
 3. Click "Download All Symbols"
-4. View results and select a symbol to preview
+4. Select a symbol and click "Preview from IndexedDB"
 
 ### Notes:
 - Data is stored in your browser's IndexedDB
-- Columns are ordered as: Date, Symbol, Open, High, Low, Close, Volume
-- The preview table shows dates as row labels (no numbered index column)
+- Preview fetches data directly from IndexedDB
 - CSV downloads contain clean column headers without index
 """)
