@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit.components.v1 import html  # This was missing
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -47,7 +48,13 @@ if st.button("Download All Symbols"):
             df = None
             for attempt in range(3):
                 try:
-                    df = yf.download(symbol, start=start_date, end=end_date, progress=False)
+                    df = yf.download(
+                        symbol, 
+                        start=start_date, 
+                        end=end_date, 
+                        progress=False,
+                        auto_adjust=True  # Explicitly set to handle yfinance changes
+                    )
                     if df is not None and not df.empty:
                         break
                 except Exception as e:
@@ -170,80 +177,77 @@ async function getSymbolData(symbol) {
 function updatePreview(symbol) {
     getSymbolData(symbol).then(data => {
         if (data && data.length > 0) {
-            // Convert to format Streamlit can display
-            const tableData = data.map(item => item.data);
+            // Create HTML table for preview
+            const table = document.createElement('table');
+            table.style.width = '100%';
+            table.style.borderCollapse = 'collapse';
+            table.style.margin = '10px 0';
             
-            // Send to Streamlit
-            window.parent.postMessage({
-                isStreamlitMessage: true,
-                type: 'previewData',
-                symbol: symbol,
-                data: tableData
-            }, '*');
+            // Add header
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            Object.keys(data[0].data).forEach(key => {
+                const th = document.createElement('th');
+                th.textContent = key;
+                th.style.border = '1px solid #ddd';
+                th.style.padding = '8px';
+                th.style.textAlign = 'left';
+                headerRow.appendChild(th);
+            });
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+            
+            // Add data rows (limit to 10)
+            const tbody = document.createElement('tbody');
+            data.slice(0, 10).forEach(item => {
+                const row = document.createElement('tr');
+                Object.values(item.data).forEach(val => {
+                    const td = document.createElement('td');
+                    td.textContent = val;
+                    td.style.border = '1px solid #ddd';
+                    td.style.padding = '8px';
+                    row.appendChild(td);
+                });
+                tbody.appendChild(row);
+            });
+            table.appendChild(tbody);
+            
+            // Display in Streamlit
+            const container = document.getElementById('preview-container');
+            if (container) {
+                container.innerHTML = '';
+                container.appendChild(table);
+            }
         } else {
-            window.parent.postMessage({
-                isStreamlitMessage: true,
-                type: 'previewData',
-                symbol: symbol,
-                data: null
-            }, '*');
+            const container = document.getElementById('preview-container');
+            if (container) {
+                container.innerHTML = '<p>No data found for this symbol</p>';
+            }
         }
     });
 }
 
-// Listen for symbol selection changes
-const selectBox = document.querySelector('select[aria-label="Select symbol to preview"]');
-if (selectBox) {
-    selectBox.addEventListener('change', (event) => {
-        updatePreview(event.target.value);
-    });
-}
-</script>
-"""
-
-# Display component for preview
-preview_placeholder = st.empty()
-st.components.v1.html(preview_js, height=0)
-
-# Handle the preview data
-if 'preview_data' not in st.session_state:
-    st.session_state.preview_data = None
-
-# Custom component to receive data from JS
-html("""
-<script>
-window.addEventListener('message', (event) => {
-    if (event.data.isStreamlitMessage && event.data.type === 'previewData') {
-        // This would need a proper Streamlit component to handle
-        console.log('Received preview data for:', event.data.symbol);
+// Initialize on load
+document.addEventListener('DOMContentLoaded', () => {
+    const selectBox = document.querySelector('select[aria-label="Select symbol to preview"]');
+    if (selectBox) {
+        selectBox.addEventListener('change', (event) => {
+            updatePreview(event.target.value);
+        });
+        
+        // Trigger initial update
+        updatePreview(selectBox.value);
     }
 });
 </script>
-""", height=0)
+"""
 
-# Fallback display using selectbox + button
-selected_symbol = st.selectbox("Select symbol to preview", symbols)
-if st.button("Show Preview"):
-    display_js = f"""
-    <script>
-    updatePreview('{selected_symbol}');
-    </script>
-    """
-    st.components.v1.html(display_js, height=0)
-    
-    # Simulate what we would do with proper JS-Python communication
-    st.info("In a full implementation, this would show the actual data from IndexedDB")
-    
-    # For demo purposes, show a sample
-    sample_data = {
-        'Date': pd.date_range(end=datetime.today(), periods=5).strftime('%Y-%m-%d').tolist(),
-        'Open': [150.0, 151.5, 152.3, 153.1, 154.2],
-        'High': [151.2, 152.8, 153.5, 154.3, 155.0],
-        'Low': [149.8, 150.5, 151.8, 152.5, 153.8],
-        'Close': [151.0, 152.3, 153.0, 153.8, 154.5],
-        'Volume': [1000000, 1200000, 950000, 1100000, 1050000]
-    }
-    st.dataframe(pd.DataFrame(sample_data))
+# Create container for preview
+html("<div id='preview-container'></div>")
+st.components.v1.html(preview_js, height=0)
+
+# Fallback display using selectbox
+selected_symbol = st.selectbox("Select symbol to preview", symbols, key='symbol_preview')
 
 # Instructions
 st.sidebar.markdown("""
@@ -251,10 +255,10 @@ st.sidebar.markdown("""
 1. Set days of history
 2. Click "Download All Symbols"
 3. Select symbol from dropdown
-4. Click "Show Preview"
+4. View data in preview section
 
-### Implementation Notes:
+### Key Features:
 - Data stored in browser's IndexedDB
-- Full implementation requires custom Streamlit component
-- Currently shows sample data for demonstration
+- Persistent storage between sessions
+- Fast client-side processing
 """)
