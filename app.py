@@ -14,6 +14,10 @@ st.write("""
 Download historical stock data for multiple symbols and store in browser's IndexedDB.
 """)
 
+# Initialize results in session state
+if 'results' not in st.session_state:
+    st.session_state.results = []
+
 # Load symbols from CSV
 @st.cache_data
 def load_symbols():
@@ -46,7 +50,7 @@ if st.button("Download All Symbols"):
     # Initialize progress
     progress_bar = st.progress(0)
     status_text = st.empty()
-    results = []
+    st.session_state.results = []  # Reset results
     
     # Download each symbol
     for i, symbol in enumerate(symbols):
@@ -72,7 +76,7 @@ if st.button("Download All Symbols"):
                     time.sleep(1)  # Wait before retrying
             
             if df is None or df.empty:
-                results.append({"symbol": symbol, "status": "failed", "message": "No data found after retries"})
+                st.session_state.results.append({"symbol": symbol, "status": "failed", "message": "No data found after retries"})
                 continue
             
             # Prepare data with correct column order
@@ -88,11 +92,11 @@ if st.button("Download All Symbols"):
             try:
                 data_json = df.to_json(orient='records', date_format='iso')
             except Exception as e:
-                results.append({"symbol": symbol, "status": "failed", "message": f"JSON conversion error: {str(e)}"})
+                st.session_state.results.append({"symbol": symbol, "status": "failed", "message": f"JSON conversion error: {str(e)}"})
                 continue
             
             # Store results for JavaScript
-            results.append({
+            st.session_state.results.append({
                 "symbol": symbol,
                 "status": "success",
                 "data": data_json,
@@ -101,13 +105,13 @@ if st.button("Download All Symbols"):
             })
             
         except Exception as e:
-            results.append({"symbol": symbol, "status": "failed", "message": str(e)})
+            st.session_state.results.append({"symbol": symbol, "status": "failed", "message": str(e)})
         
         # Update progress
         progress_bar.progress((i + 1) / len(symbols))
     
     # Generate JavaScript code for IndexedDB storage
-    success_count = sum(1 for r in results if r['status'] == 'success')
+    success_count = sum(1 for r in st.session_state.results if r['status'] == 'success')
     js_code = f"""
     <script>
     // Initialize IndexedDB
@@ -133,7 +137,7 @@ if st.button("Download All Symbols"):
         console.log("Database opened successfully");
         
         // Process results
-        const results = {results};
+        const results = {st.session_state.results};
         let totalAdded = 0;
         
         function processNext(index) {{
@@ -259,7 +263,7 @@ if st.button("Download All Symbols"):
     st.success(f"Downloaded {success_count}/{len(symbols)} symbols successfully!")
     
     # Show summary table
-    results_df = pd.DataFrame(results)
+    results_df = pd.DataFrame(st.session_state.results)
     st.subheader("Download Summary")
     st.dataframe(results_df[['symbol', 'status', 'message']])
     
@@ -267,36 +271,37 @@ if st.button("Download All Symbols"):
     st.components.v1.html(js_code, height=0)
 
 # Symbol selection and preview from IndexedDB
-success_symbols = [r['symbol'] for r in results if 'results' in locals() and r['status'] == 'success']
-if success_symbols:
-    selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
-    
-    if st.button("Preview from IndexedDB"):
-        # Send symbol to JavaScript
-        js_fetch = f"""
-        <script>
-            Streamlit.sendMessage({{"action": "fetch", "symbol": "{selected_symbol}"}});
-        </script>
-        """
-        st.components.v1.html(js_fetch, height=0)
+if hasattr(st.session_state, 'results'):
+    success_symbols = [r['symbol'] for r in st.session_state.results if r['status'] == 'success']
+    if success_symbols:
+        selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
         
-        # Handle the response from JavaScript
-        @st.experimental_connect
-        def handle_preview_data(message):
-            if message.get("action") == "preview":
-                if "error" in message:
-                    st.error(f"Error for {message['symbol']}: {message['error']}")
-                else:
-                    # Display the data
-                    df = pd.DataFrame(message["data"])
-                    st.subheader(f"{message['symbol']} Data (from IndexedDB)")
-                    st.dataframe(df.set_index('Date'))  # Clean display
-                    
-                    # Download CSV
-                    csv = df.to_csv(index=False)
-                    b64 = base64.b64encode(csv.encode()).decode()
-                    href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download CSV</a>'
-                    st.markdown(href, unsafe_allow_html=True)
+        if st.button("Preview from IndexedDB"):
+            # Send symbol to JavaScript
+            js_fetch = f"""
+            <script>
+                Streamlit.sendMessage({{"action": "fetch", "symbol": "{selected_symbol}"}});
+            </script>
+            """
+            st.components.v1.html(js_fetch, height=0)
+            
+            # Handle the response from JavaScript
+            @st.experimental_connect
+            def handle_preview_data(message):
+                if message.get("action") == "preview":
+                    if "error" in message:
+                        st.error(f"Error for {message['symbol']}: {message['error']}")
+                    else:
+                        # Display the data
+                        df = pd.DataFrame(message["data"])
+                        st.subheader(f"{message['symbol']} Data (from IndexedDB)")
+                        st.dataframe(df.set_index('Date'))  # Clean display
+                        
+                        # Download CSV
+                        csv = df.to_csv(index=False)
+                        b64 = base64.b64encode(csv.encode()).decode()
+                        href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download CSV</a>'
+                        st.markdown(href, unsafe_allow_html=True)
 
 # Instructions
 st.sidebar.markdown("""
