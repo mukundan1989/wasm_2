@@ -17,6 +17,8 @@ Download historical stock data for multiple symbols and store in browser's Index
 # Initialize results in session state
 if 'results' not in st.session_state:
     st.session_state.results = []
+if 'preview_data' not in st.session_state:
+    st.session_state.preview_data = None
 
 # Load symbols from CSV
 @st.cache_data
@@ -217,7 +219,7 @@ if st.button("Download All Symbols"):
         // Start processing
         processNext(0);
         
-        // Function to fetch data from IndexedDB
+        // Function to fetch data from IndexedDB and update Streamlit
         function fetchDataFromIndexedDB(symbol) {{
             const transaction = db.transaction(["stockData"], "readonly");
             const store = transaction.objectStore("stockData");
@@ -227,51 +229,39 @@ if st.button("Download All Symbols"):
                 const records = event.target.result;
                 if (records.length > 0) {{
                     const data = records.map(record => record.data);
-                    // Create hidden input with data
-                    const input = document.createElement("input");
-                    input.type = "hidden";
-                    input.id = "indexeddb_data";
-                    input.value = JSON.stringify({{
+                    // Update Streamlit via window
+                    window.previewData = {{
                         action: "preview",
                         symbol: symbol,
                         data: data
-                    }});
-                    document.body.appendChild(input);
-                    // Trigger Streamlit update
+                    }};
+                    // Force Streamlit to update
                     setTimeout(() => {{
-                        const event = new Event("input");
-                        document.getElementById("indexeddb_data").dispatchEvent(event);
+                        const previewEvent = new CustomEvent('previewDataReady', {{ detail: window.previewData }});
+                        window.dispatchEvent(previewEvent);
                     }}, 100);
                 }} else {{
-                    const input = document.createElement("input");
-                    input.type = "hidden";
-                    input.id = "indexeddb_data";
-                    input.value = JSON.stringify({{
+                    window.previewData = {{
                         action: "preview",
                         symbol: symbol,
                         error: "No data found in IndexedDB"
-                    }});
-                    document.body.appendChild(input);
+                    }};
                     setTimeout(() => {{
-                        const event = new Event("input");
-                        document.getElementById("indexeddb_data").dispatchEvent(event);
+                        const previewEvent = new CustomEvent('previewDataReady', {{ detail: window.previewData }});
+                        window.dispatchEvent(previewEvent);
                     }}, 100);
                 }}
             }};
             
             request.onerror = function(event) {{
-                const input = document.createElement("input");
-                input.type = "hidden";
-                input.id = "indexeddb_data";
-                input.value = JSON.stringify({{
+                window.previewData = {{
                     action: "preview",
                     symbol: symbol,
                     error: "Failed to fetch data from IndexedDB"
-                }});
-                document.body.appendChild(input);
+                }};
                 setTimeout(() => {{
-                    const event = new Event("input");
-                    document.getElementById("indexeddb_data").dispatchEvent(event);
+                    const previewEvent = new CustomEvent('previewDataReady', {{ detail: window.previewData }});
+                    window.dispatchEvent(previewEvent);
                 }}, 100);
             }};
         }}
@@ -303,54 +293,74 @@ if hasattr(st.session_state, 'results'):
         selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
         
         if st.button("Preview from IndexedDB"):
-            # Create hidden input to receive data
-            st.text_input("IndexedDB Data", key="indexeddb_data", label_visibility="collapsed")
+            # Create a placeholder for the preview
+            preview_placeholder = st.empty()
             
-            # Send symbol to JavaScript
+            # JavaScript to fetch data and communicate back
             js_fetch = f"""
             <script>
-                // Check if DB is initialized
-                if (typeof db !== 'undefined') {{
+                // First check if DB is initialized
+                if (typeof db !== 'undefined' && typeof fetchDataFromIndexedDB !== 'undefined') {{
+                    // Fetch the data
                     fetchDataFromIndexedDB("{selected_symbol}");
+                    
+                    // Listen for the preview data
+                    window.addEventListener('previewDataReady', function(e) {{
+                        const data = e.detail;
+                        // Create a hidden input with the data
+                        const input = document.createElement("input");
+                        input.type = "hidden";
+                        input.id = "indexeddb_preview_data";
+                        input.value = JSON.stringify(data);
+                        document.body.appendChild(input);
+                        // Trigger Streamlit update
+                        const event = new Event("input");
+                        document.getElementById("indexeddb_preview_data").dispatchEvent(event);
+                    }});
                 }} else {{
+                    // Database not ready - create error message
                     const input = document.createElement("input");
                     input.type = "hidden";
-                    input.id = "indexeddb_data";
+                    input.id = "indexeddb_preview_data";
                     input.value = JSON.stringify({{
                         action: "preview",
                         symbol: "{selected_symbol}",
-                        error: "Database not initialized. Please download data first."
+                        error: "Please download data first"
                     }});
                     document.body.appendChild(input);
-                    setTimeout(() => {{
-                        const event = new Event("input");
-                        document.getElementById("indexeddb_data").dispatchEvent(event);
-                    }}, 100);
+                    // Trigger Streamlit update
+                    const event = new Event("input");
+                    document.getElementById("indexeddb_preview_data").dispatchEvent(event);
                 }}
             </script>
             """
+            
+            # Hidden input to receive data from JavaScript
+            preview_data = st.text_input("Preview Data", key="indexeddb_preview_data", label_visibility="collapsed")
+            
+            # Execute the JavaScript
             st.components.v1.html(js_fetch, height=0)
             
-            # Handle the response
-            if "indexeddb_data" in st.session_state and st.session_state.indexeddb_data:
+            # Handle the preview data when it arrives
+            if preview_data:
                 try:
-                    message = json.loads(st.session_state.indexeddb_data)
+                    message = json.loads(preview_data)
                     if message.get("action") == "preview":
                         if "error" in message:
-                            st.error(f"Error for {message['symbol']}: {message['error']}")
+                            preview_placeholder.error(f"Error for {message['symbol']}: {message['error']}")
                         else:
                             # Display the data
                             df = pd.DataFrame(message["data"])
-                            st.subheader(f"{message['symbol']} Data (from IndexedDB)")
-                            st.dataframe(df.set_index('Date'))
+                            preview_placeholder.subheader(f"{message['symbol']} Data (from IndexedDB)")
+                            preview_placeholder.dataframe(df.set_index('Date'))
                             
                             # Download CSV
                             csv = df.to_csv(index=False)
                             b64 = base64.b64encode(csv.encode()).decode()
                             href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download CSV</a>'
-                            st.markdown(href, unsafe_allow_html=True)
+                            preview_placeholder.markdown(href, unsafe_allow_html=True)
                 except json.JSONDecodeError:
-                    st.error("Failed to parse data from IndexedDB")
+                    preview_placeholder.error("Failed to parse data from IndexedDB")
 
 # Instructions
 st.sidebar.markdown("""
