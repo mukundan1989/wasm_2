@@ -101,7 +101,8 @@ if st.button("Download All Symbols"):
                 "status": "success",
                 "data": data_json,
                 "records": len(df),
-                "columns": list(df.columns)
+                "columns": list(df.columns),
+                "message": "Downloaded successfully"
             })
             
         except Exception as e:
@@ -137,7 +138,7 @@ if st.button("Download All Symbols"):
         console.log("Database opened successfully");
         
         // Process results
-        const results = {st.session_state.results};
+        const results = {json.dumps(st.session_state.results)};
         let totalAdded = 0;
         
         function processNext(index) {{
@@ -226,35 +227,57 @@ if st.button("Download All Symbols"):
                 const records = event.target.result;
                 if (records.length > 0) {{
                     const data = records.map(record => record.data);
-                    Streamlit.setComponentValue({{
+                    // Create hidden input with data
+                    const input = document.createElement("input");
+                    input.type = "hidden";
+                    input.id = "indexeddb_data";
+                    input.value = JSON.stringify({{
                         action: "preview",
                         symbol: symbol,
                         data: data
                     }});
+                    document.body.appendChild(input);
+                    // Trigger Streamlit update
+                    setTimeout(() => {{
+                        const event = new Event("input");
+                        document.getElementById("indexeddb_data").dispatchEvent(event);
+                    }}, 100);
                 }} else {{
-                    Streamlit.setComponentValue({{
+                    const input = document.createElement("input");
+                    input.type = "hidden";
+                    input.id = "indexeddb_data";
+                    input.value = JSON.stringify({{
                         action: "preview",
                         symbol: symbol,
                         error: "No data found in IndexedDB"
                     }});
+                    document.body.appendChild(input);
+                    setTimeout(() => {{
+                        const event = new Event("input");
+                        document.getElementById("indexeddb_data").dispatchEvent(event);
+                    }}, 100);
                 }}
             }};
             
             request.onerror = function(event) {{
-                Streamlit.setComponentValue({{
+                const input = document.createElement("input");
+                input.type = "hidden";
+                input.id = "indexeddb_data";
+                input.value = JSON.stringify({{
                     action: "preview",
                     symbol: symbol,
                     error: "Failed to fetch data from IndexedDB"
                 }});
+                document.body.appendChild(input);
+                setTimeout(() => {{
+                    const event = new Event("input");
+                    document.getElementById("indexeddb_data").dispatchEvent(event);
+                }}, 100);
             }};
         }}
         
-        // Listen for messages from Python
-        Streamlit.onMessage(function(message) {{
-            if (message.action === "fetch") {{
-                fetchDataFromIndexedDB(message.symbol);
-            }}
-        }});
+        // Make function available globally
+        window.fetchDataFromIndexedDB = fetchDataFromIndexedDB;
     }};
     </script>
     """
@@ -265,13 +288,11 @@ if st.button("Download All Symbols"):
     # Show summary table
     results_df = pd.DataFrame(st.session_state.results)
     st.subheader("Download Summary")
-    
-    # Safely display available columns
     columns_to_show = ['symbol', 'status']
     if 'message' in results_df.columns:
         columns_to_show.append('message')
     st.dataframe(results_df[columns_to_show])
-
+    
     # Execute JavaScript
     st.components.v1.html(js_code, height=0)
 
@@ -282,31 +303,54 @@ if hasattr(st.session_state, 'results'):
         selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
         
         if st.button("Preview from IndexedDB"):
+            # Create hidden input to receive data
+            st.text_input("IndexedDB Data", key="indexeddb_data", label_visibility="collapsed")
+            
             # Send symbol to JavaScript
             js_fetch = f"""
             <script>
-                Streamlit.sendMessage({{"action": "fetch", "symbol": "{selected_symbol}"}});
+                // Check if DB is initialized
+                if (typeof db !== 'undefined') {{
+                    fetchDataFromIndexedDB("{selected_symbol}");
+                }} else {{
+                    const input = document.createElement("input");
+                    input.type = "hidden";
+                    input.id = "indexeddb_data";
+                    input.value = JSON.stringify({{
+                        action: "preview",
+                        symbol: "{selected_symbol}",
+                        error: "Database not initialized. Please download data first."
+                    }});
+                    document.body.appendChild(input);
+                    setTimeout(() => {{
+                        const event = new Event("input");
+                        document.getElementById("indexeddb_data").dispatchEvent(event);
+                    }}, 100);
+                }}
             </script>
             """
             st.components.v1.html(js_fetch, height=0)
             
-            # Handle the response from JavaScript
-            @st.experimental_connect
-            def handle_preview_data(message):
-                if message.get("action") == "preview":
-                    if "error" in message:
-                        st.error(f"Error for {message['symbol']}: {message['error']}")
-                    else:
-                        # Display the data
-                        df = pd.DataFrame(message["data"])
-                        st.subheader(f"{message['symbol']} Data (from IndexedDB)")
-                        st.dataframe(df.set_index('Date'))  # Clean display
-                        
-                        # Download CSV
-                        csv = df.to_csv(index=False)
-                        b64 = base64.b64encode(csv.encode()).decode()
-                        href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download CSV</a>'
-                        st.markdown(href, unsafe_allow_html=True)
+            # Handle the response
+            if "indexeddb_data" in st.session_state and st.session_state.indexeddb_data:
+                try:
+                    message = json.loads(st.session_state.indexeddb_data)
+                    if message.get("action") == "preview":
+                        if "error" in message:
+                            st.error(f"Error for {message['symbol']}: {message['error']}")
+                        else:
+                            # Display the data
+                            df = pd.DataFrame(message["data"])
+                            st.subheader(f"{message['symbol']} Data (from IndexedDB)")
+                            st.dataframe(df.set_index('Date'))
+                            
+                            # Download CSV
+                            csv = df.to_csv(index=False)
+                            b64 = base64.b64encode(csv.encode()).decode()
+                            href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download CSV</a>'
+                            st.markdown(href, unsafe_allow_html=True)
+                except json.JSONDecodeError:
+                    st.error("Failed to parse data from IndexedDB")
 
 # Instructions
 st.sidebar.markdown("""
