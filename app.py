@@ -265,8 +265,13 @@ if st.button("Download All Symbols"):
     # Show summary table
     results_df = pd.DataFrame(st.session_state.results)
     st.subheader("Download Summary")
-    st.dataframe(results_df[['symbol', 'status', 'message']])
     
+    # Safely display available columns
+    columns_to_show = ['symbol', 'status']
+    if 'message' in results_df.columns:
+        columns_to_show.append('message')
+    st.dataframe(results_df[columns_to_show])
+
     # Execute JavaScript
     st.components.v1.html(js_code, height=0)
 
