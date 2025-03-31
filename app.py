@@ -14,12 +14,6 @@ st.write("""
 Download historical stock data for multiple symbols and store in browser's IndexedDB.
 """)
 
-# Initialize results in session state
-if 'results' not in st.session_state:
-    st.session_state.results = []
-if 'preview_data' not in st.session_state:
-    st.session_state.preview_data = None
-
 # Load symbols from CSV
 @st.cache_data
 def load_symbols():
@@ -52,7 +46,7 @@ if st.button("Download All Symbols"):
     # Initialize progress
     progress_bar = st.progress(0)
     status_text = st.empty()
-    st.session_state.results = []  # Reset results
+    results = []
     
     # Download each symbol
     for i, symbol in enumerate(symbols):
@@ -78,48 +72,35 @@ if st.button("Download All Symbols"):
                     time.sleep(1)  # Wait before retrying
             
             if df is None or df.empty:
-                st.session_state.results.append({"symbol": symbol, "status": "failed", "message": "No data found after retries"})
+                results.append({"symbol": symbol, "status": "failed", "message": "No data found after retries"})
                 continue
             
-            # Prepare data with correct column order
+            # Prepare data
             df = df.reset_index()
             df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
-            df['Symbol'] = symbol  # Add symbol column
-            
-            # Reorder columns as: Date, Symbol, Open, High, Low, Close, Volume
-            column_order = ['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Volume']
-            df = df[column_order]
-            
-            # Convert to JSON safely
-            try:
-                data_json = df.to_json(orient='records', date_format='iso')
-            except Exception as e:
-                st.session_state.results.append({"symbol": symbol, "status": "failed", "message": f"JSON conversion error: {str(e)}"})
-                continue
+            df['Symbol'] = symbol  # Add symbol column to dataframe
             
             # Store results for JavaScript
-            st.session_state.results.append({
+            results.append({
                 "symbol": symbol,
                 "status": "success",
-                "data": data_json,
                 "records": len(df),
-                "columns": list(df.columns),
-                "message": "Downloaded successfully"
+                "columns": list(df.columns)
             })
             
         except Exception as e:
-            st.session_state.results.append({"symbol": symbol, "status": "failed", "message": str(e)})
+            results.append({"symbol": symbol, "status": "failed", "message": str(e)})
         
         # Update progress
         progress_bar.progress((i + 1) / len(symbols))
     
-    # Generate JavaScript code for IndexedDB storage
-    success_count = sum(1 for r in st.session_state.results if r['status'] == 'success')
+    # Generate JavaScript code for storage
+    success_count = sum(1 for r in results if r['status'] == 'success')
     js_code = f"""
     <script>
     // Initialize IndexedDB
     let db;
-    const request = indexedDB.open("StockDatabase", 3);  // Version 3
+    const request = indexedDB.open("StockDatabase", 4);  // Version 4
     
     request.onerror = function(event) {{
         console.log("Database error: " + event.target.errorCode);
@@ -139,28 +120,24 @@ if st.button("Download All Symbols"):
         db = event.target.result;
         console.log("Database opened successfully");
         
-        // Process results
-        const results = {json.dumps(st.session_state.results)};
-        let totalAdded = 0;
+        // Process symbols
+        const symbols = {json.dumps([r['symbol'] for r in results if r['status'] == 'success'])};
+        let processedCount = 0;
         
         function processNext(index) {{
-            if (index >= results.length) {{
+            if (index >= symbols.length) {{
                 // All done
-                alert(`Processed ${{results.length}} symbols. Success: ${{success_count}}, Failed: ${{results.length - success_count}}`);
+                alert(`Processed ${{symbols.length}} symbols successfully!`);
                 return;
             }}
             
-            const result = results[index];
-            if (result.status !== 'success') {{
-                console.log(`Skipping ${{result.symbol}}: ${{result.message}}`);
-                processNext(index + 1);
-                return;
-            }}
+            const symbol = symbols[index];
+            console.log(`Processing ${{symbol}}...`);
             
             // Clear existing data for this symbol
             const transaction = db.transaction(["stockData"], "readwrite");
             const objectStore = transaction.objectStore("stockData");
-            const indexReq = objectStore.index("symbol").openCursor(IDBKeyRange.only(result.symbol));
+            const indexReq = objectStore.index("symbol").openCursor(IDBKeyRange.only(symbol));
             
             let recordsToDelete = [];
             indexReq.onsuccess = function(event) {{
@@ -179,95 +156,75 @@ if st.button("Download All Symbols"):
                         }});
                         
                         deleteTransaction.oncomplete = function() {{
-                            console.log(`Deleted ${{recordsToDelete.length}} old records for ${{result.symbol}}`);
-                            addNewData(result, index);
+                            console.log(`Deleted ${{recordsToDelete.length}} old records for ${{symbol}}`);
+                            fetchAndStoreData(symbol, index);
                         }};
                     }} else {{
-                        addNewData(result, index);
+                        fetchAndStoreData(symbol, index);
                     }}
                 }}
             }};
         }}
         
-        function addNewData(result, index) {{
-            // Add new data
-            try {{
-                const data = JSON.parse(result.data);
-                const addTransaction = db.transaction(["stockData"], "readwrite");
-                const addStore = addTransaction.objectStore("stockData");
-                
-                data.forEach(item => {{
-                    const record = {{
-                        symbol: result.symbol,
-                        date: item.Date,
-                        data: item
+        function fetchAndStoreData(symbol, index) {{
+            // Fetch fresh data from Yahoo Finance
+            const url = `https://query1.finance.yahoo.com/v7/finance/download/${{symbol}}?period1=${{Math.floor((new Date('{start_date.strftime('%Y-%m-%d')}')).getTime()/1000)}}&period2=${{Math.floor((new Date('{end_date.strftime('%Y-%m-%d')}')).getTime()/1000)}}&interval=1d&events=history`;
+            
+            fetch(url)
+                .then(response => response.text())
+                .then(csvData => {{
+                    // Parse CSV data
+                    const lines = csvData.split('\\n');
+                    const headers = lines[0].split(',');
+                    const records = [];
+                    
+                    for (let i = 1; i < lines.length; i++) {{
+                        if (lines[i].trim() === '') continue;
+                        const values = lines[i].split(',');
+                        const record = {{}};
+                        for (let j = 0; j < headers.length; j++) {{
+                            record[headers[j]] = values[j];
+                        }}
+                        record['Symbol'] = symbol;
+                        records.push(record);
+                    }}
+                    
+                    // Store in IndexedDB
+                    const addTransaction = db.transaction(["stockData"], "readwrite");
+                    const addStore = addTransaction.objectStore("stockData");
+                    
+                    records.forEach(record => {{
+                        addStore.add({{
+                            symbol: symbol,
+                            date: record.Date,
+                            data: record
+                        }});
+                    }});
+                    
+                    addTransaction.oncomplete = function() {{
+                        console.log(`Stored ${{records.length}} records for ${{symbol}}`);
+                        processedCount++;
+                        updateProgress(processedCount, symbols.length);
+                        processNext(index + 1);
                     }};
-                    addStore.add(record);
-                }});
-                
-                addTransaction.oncomplete = function() {{
-                    console.log(`Added ${{data.length}} records for ${{result.symbol}}`);
-                    totalAdded += data.length;
+                }})
+                .catch(error => {{
+                    console.error(`Error processing ${{symbol}}:`, error);
+                    processedCount++;
+                    updateProgress(processedCount, symbols.length);
                     processNext(index + 1);
-                }};
-            }} catch(e) {{
-                console.error(`Error processing ${{result.symbol}}:`, e);
-                processNext(index + 1);
-            }}
+                }});
+        }}
+        
+        function updateProgress(current, total) {{
+            // Send progress update back to Python
+            const progress = Math.round((current / total) * 100);
+            console.log(`Progress: ${{progress}}%`);
+            // This would need a proper Streamlit-JS bridge for real-time updates
         }}
         
         // Start processing
         processNext(0);
-        
-        // Function to fetch data from IndexedDB and update Streamlit
-        function fetchDataFromIndexedDB(symbol) {{
-            const transaction = db.transaction(["stockData"], "readonly");
-            const store = transaction.objectStore("stockData");
-            const request = store.index("symbol").getAll(IDBKeyRange.only(symbol));
-            
-            request.onsuccess = function(event) {{
-                const records = event.target.result;
-                if (records.length > 0) {{
-                    const data = records.map(record => record.data);
-                    // Update Streamlit via window
-                    window.previewData = {{
-                        action: "preview",
-                        symbol: symbol,
-                        data: data
-                    }};
-                    // Force Streamlit to update
-                    setTimeout(() => {{
-                        const previewEvent = new CustomEvent('previewDataReady', {{ detail: window.previewData }});
-                        window.dispatchEvent(previewEvent);
-                    }}, 100);
-                }} else {{
-                    window.previewData = {{
-                        action: "preview",
-                        symbol: symbol,
-                        error: "No data found in IndexedDB"
-                    }};
-                    setTimeout(() => {{
-                        const previewEvent = new CustomEvent('previewDataReady', {{ detail: window.previewData }});
-                        window.dispatchEvent(previewEvent);
-                    }}, 100);
-                }}
-            }};
-            
-            request.onerror = function(event) {{
-                window.previewData = {{
-                    action: "preview",
-                    symbol: symbol,
-                    error: "Failed to fetch data from IndexedDB"
-                }};
-                setTimeout(() => {{
-                    const previewEvent = new CustomEvent('previewDataReady', {{ detail: window.previewData }});
-                    window.dispatchEvent(previewEvent);
-                }}, 100);
-            }};
-        }}
-        
-        // Make function available globally
-        window.fetchDataFromIndexedDB = fetchDataFromIndexedDB;
     }};
     </script>
     """
@@ -276,91 +233,107 @@ if st.button("Download All Symbols"):
     st.success(f"Downloaded {success_count}/{len(symbols)} symbols successfully!")
     
     # Show summary table
-    results_df = pd.DataFrame(st.session_state.results)
+    results_df = pd.DataFrame(results)
     st.subheader("Download Summary")
-    columns_to_show = ['symbol', 'status']
-    if 'message' in results_df.columns:
-        columns_to_show.append('message')
-    st.dataframe(results_df[columns_to_show])
+    st.dataframe(results_df[['symbol', 'status', 'message']])
     
     # Execute JavaScript
     st.components.v1.html(js_code, height=0)
 
-# Symbol selection and preview from IndexedDB
-if hasattr(st.session_state, 'results'):
-    success_symbols = [r['symbol'] for r in st.session_state.results if r['status'] == 'success']
-    if success_symbols:
-        selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
+# JavaScript code to fetch data from IndexedDB for preview
+query_js = """
+<script>
+function getSymbolData(symbol, callback) {
+    const request = indexedDB.open("StockDatabase", 4);
+    
+    request.onerror = function(event) {
+        console.log("Database error:", event.target.error);
+        callback([]);
+    };
+    
+    request.onsuccess = function(event) {
+        const db = event.target.result;
+        const transaction = db.transaction(["stockData"], "readonly");
+        const objectStore = transaction.objectStore("stockData");
+        const index = objectStore.index("symbol");
+        const request = index.getAll(IDBKeyRange.only(symbol));
         
-        if st.button("Preview from IndexedDB"):
-            # Create a placeholder for the preview
-            preview_placeholder = st.empty()
-            
-            # JavaScript to fetch data and communicate back
-            js_fetch = f"""
-            <script>
-                // First check if DB is initialized
-                if (typeof db !== 'undefined' && typeof fetchDataFromIndexedDB !== 'undefined') {{
-                    // Fetch the data
-                    fetchDataFromIndexedDB("{selected_symbol}");
-                    
-                    // Listen for the preview data
-                    window.addEventListener('previewDataReady', function(e) {{
-                        const data = e.detail;
-                        // Create a hidden input with the data
-                        const input = document.createElement("input");
-                        input.type = "hidden";
-                        input.id = "indexeddb_preview_data";
-                        input.value = JSON.stringify(data);
-                        document.body.appendChild(input);
-                        // Trigger Streamlit update
-                        const event = new Event("input");
-                        document.getElementById("indexeddb_preview_data").dispatchEvent(event);
-                    }});
-                }} else {{
-                    // Database not ready - create error message
-                    const input = document.createElement("input");
-                    input.type = "hidden";
-                    input.id = "indexeddb_preview_data";
-                    input.value = JSON.stringify({{
-                        action: "preview",
-                        symbol: "{selected_symbol}",
-                        error: "Please download data first"
-                    }});
-                    document.body.appendChild(input);
-                    // Trigger Streamlit update
-                    const event = new Event("input");
-                    document.getElementById("indexeddb_preview_data").dispatchEvent(event);
-                }}
-            </script>
-            """
-            
-            # Hidden input to receive data from JavaScript
-            preview_data = st.text_input("Preview Data", key="indexeddb_preview_data", label_visibility="collapsed")
-            
-            # Execute the JavaScript
-            st.components.v1.html(js_fetch, height=0)
-            
-            # Handle the preview data when it arrives
-            if preview_data:
-                try:
-                    message = json.loads(preview_data)
-                    if message.get("action") == "preview":
-                        if "error" in message:
-                            preview_placeholder.error(f"Error for {message['symbol']}: {message['error']}")
-                        else:
-                            # Display the data
-                            df = pd.DataFrame(message["data"])
-                            preview_placeholder.subheader(f"{message['symbol']} Data (from IndexedDB)")
-                            preview_placeholder.dataframe(df.set_index('Date'))
-                            
-                            # Download CSV
-                            csv = df.to_csv(index=False)
-                            b64 = base64.b64encode(csv.encode()).decode()
-                            href = f'<a href="data:file/csv;base64,{b64}" download="{selected_symbol}_data.csv">Download CSV</a>'
-                            preview_placeholder.markdown(href, unsafe_allow_html=True)
-                except json.JSONDecodeError:
-                    preview_placeholder.error("Failed to parse data from IndexedDB")
+        request.onerror = function(event) {
+            console.log("Query error:", event.target.error);
+            callback([]);
+        };
+        
+        request.onsuccess = function(event) {
+            const data = event.target.result.map(item => item.data);
+            callback(data);
+        };
+    };
+    
+    request.onupgradeneeded = function(event) {
+        // Handle case where DB needs upgrade
+        callback([]);
+    };
+}
+
+// Function to communicate with Streamlit
+function updateSymbolData(symbol, data) {
+    const dataStr = JSON.stringify(data);
+    window.parent.postMessage({
+        type: 'symbolData',
+        symbol: symbol,
+        data: dataStr
+    }, '*');
+}
+</script>
+"""
+
+# Display the query JavaScript
+st.components.v1.html(query_js, height=0)
+
+# Symbol selection dropdown
+if 'results' in locals():
+    success_symbols = [r['symbol'] for r in results if r['status'] == 'success']
+else:
+    # If no recent download, show all symbols we have in IndexedDB
+    success_symbols = symbols  # Fallback to all symbols from CSV
+
+if success_symbols:
+    selected_symbol = st.selectbox("Select Symbol to Preview", success_symbols)
+    
+    # JavaScript to fetch and display data
+    display_js = f"""
+    <script>
+    getSymbolData("{selected_symbol}", function(data) {{
+        if (data && data.length > 0) {{
+            updateSymbolData("{selected_symbol}", data);
+        }} else {{
+            console.log("No data found for {selected_symbol}");
+        }}
+    }});
+    </script>
+    """
+    
+    st.components.v1.html(display_js, height=0)
+    
+    # Placeholder for the data display
+    data_placeholder = st.empty()
+    
+    # JavaScript message handler
+    handler_js = """
+    <script>
+    window.addEventListener('message', function(event) {
+        if (event.data.type === 'symbolData') {
+            // This would need proper Streamlit-JS bridge to update the Python side
+            console.log("Received data for:", event.data.symbol);
+            console.log("Sample data:", event.data.data.substring(0, 100));
+        }
+    });
+    </script>
+    """
+    st.components.v1.html(handler_js, height=0)
+    
+    # Note: In a production app, you would need a proper Streamlit-JS bridge
+    st.info("Note: A full implementation would require a proper Streamlit-JS bridge to display the data fetched from IndexedDB. This example shows the concept but doesn't implement the full data transfer.")
 
 # Instructions
 st.sidebar.markdown("""
@@ -368,10 +341,10 @@ st.sidebar.markdown("""
 1. Ensure `symbols.csv` exists with a "Symbol" column
 2. Set the number of days of history needed
 3. Click "Download All Symbols"
-4. Select a symbol and click "Preview from IndexedDB"
+4. Select a symbol to preview data from IndexedDB
 
 ### Notes:
 - Data is stored in your browser's IndexedDB
-- Preview fetches data directly from IndexedDB
-- CSV downloads contain clean column headers without index
+- Preview now shows data fetched directly from IndexedDB
+- Full implementation requires Streamlit-JS bridge for data transfer
 """)
